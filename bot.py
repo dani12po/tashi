@@ -2,11 +2,15 @@
 # -*- coding: utf-8 -*-
 """
 Tashi DePIN Worker — Termux helper (EXPERIMENTAL)
-Termux -> (deteksi ARM dan stop) atau provisioning ke VPS x86_64
 
-Cara pakai (di Termux):
-  python bot.py                # default: install (akan stop di ARM dgn message & saran VPS)
-  python bot.py vps user@IP    # PROVISION ke VPS x86_64 via SSH (root/sudo)
+Mode 1 (Android/ARM — eksperimental, sering gagal):
+  python bot.py install --force
+
+Mode 2 (disarankan, VPS x86_64):
+  python bot.py vps user@IP
+  python bot.py vps ubuntu@1.2.3.4:2222
+
+Utilitas:
   python bot.py status
   python bot.py logs
   python bot.py restart
@@ -38,6 +42,7 @@ AUTH_VOLUME = "tashi-depin-worker-auth"
 CONFIG_DIR = Path.home() / ".tashi-termux"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 
+# ---------------------- Utils ----------------------
 def run(cmd, check=True, shell=True, env=None):
     print(f"\n>> {cmd}")
     proc = subprocess.run(cmd, shell=shell, env=env)
@@ -49,13 +54,18 @@ def in_proot(cmd, check=True):
     full = f'proot-distro login {UBUNTU_DISTRO} -- bash -lc "{cmd}"'
     return run(full, check=check, shell=True)
 
-def is_cmd(name): return shutil.which(name) is not None
-def is_termux(): return os.path.exists("/data/data/com.termux/files/usr")
+def is_cmd(name):
+    return shutil.which(name) is not None
+
+def is_termux():
+    return os.path.exists("/data/data/com.termux/files/usr")
 
 def load_config():
     if CONFIG_PATH.exists():
-        try: return json.loads(CONFIG_PATH.read_text())
-        except Exception: return {}
+        try:
+            return json.loads(CONFIG_PATH.read_text())
+        except Exception:
+            return {}
     return {}
 
 def save_config(cfg):
@@ -65,28 +75,34 @@ def save_config(cfg):
 def get_saved_wallet():
     return load_config().get("solana_wallet")
 
+# Base58 sederhana (tanpa 0 O I l), panjang 32..48
 _BASE58_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,48}$")
-def validate_wallet(addr): return bool(_BASE58_RE.match(addr.strip())) if addr else False
+def validate_wallet(addr):
+    return bool(_BASE58_RE.match(addr.strip())) if addr else False
 
 def open_url_android(url):
-    if is_cmd("am"): run(f'am start -a android.intent.action.VIEW -d "{url}"', check=False)
+    if is_cmd("am"):
+        run(f'am start -a android.intent.action.VIEW -d "{url}"', check=False)
     print(f"[i] Buka di browser: {url}")
 
-# ---------------------- Termux path (local/proot) ----------------------
-def preflight():
+# ---------------------- Termux local/proot path ----------------------
+def preflight(force=False):
     print("=== Preflight ===")
     if not is_termux():
         print("[!] Bukan di Termux. Script ini ditulis untuk Termux (Android). Lanjut tetap dicoba.")
     arch = platform.machine().lower()
     print(f"[i] Detected arch: {arch}")
-    # Tashi mensyaratkan OS 64-bit yang didukung (x86_64/amd64). ARM/aarch64 tidak didukung saat ini.
+    # Tashi mendukung x86_64/amd64. ARM/aarch64 akan ditolak kecuali --force.
     if "x86_64" not in arch and "amd64" not in arch:
-        raise SystemExit(
-            "\n[x] Platform ARM/aarch64 terdeteksi. Installer Tashi saat ini mendukung x86_64/amd64 "
-            "(Linux 64-bit/WSL/macOS Intel) dengan Docker/Podman. "
-            "Jalankan di VPS/PC x86-64. Gunakan:  python bot.py vps user@IP\n"
-            "Referensi: docs.tashi.network Node Installation."
-        )
+        if not force:
+            raise SystemExit(
+                "\n[x] Platform ARM/aarch64 terdeteksi. Tashi saat ini mendukung x86_64/amd64 "
+                "(Linux 64-bit/WSL/macOS Intel) dengan Docker/Podman.\n"
+                "Jalankan di VPS/PC x86-64. Atau pakai mode paksa: python bot.py install --force\n"
+                "Referensi: docs.tashi.network Node Installation."
+            )
+        else:
+            print("[!!] FORCE MODE: Melanjutkan di ARM/aarch64. Ini eksperimental dan kemungkinan besar gagal.")
     if not is_cmd("pkg"):
         raise SystemExit("[x] Perintah 'pkg' tidak ditemukan. Pastikan memakai Termux.")
 
@@ -114,6 +130,7 @@ def setup_inside_ubuntu():
 
 def run_tashi_install():
     print("\n=== Step 4: Jalankan installer resmi Tashi (mode interaktif) ===")
+    # Coba primary, jika gagal pakai alternatif
     cmd = (
         "set -e; "
         "if command -v curl >/dev/null 2>&1; then "
@@ -139,11 +156,11 @@ def show_next_steps():
     if wal:
         print(f"    • Wallet Solana (devnet) yang kamu set: {wal}")
 
-# ---------------------- VPS Provisioning via SSH ----------------------
-def cmd_vps(target: str):
+# ---------------------- VPS Provisioning via SSH (disarankan) ----------------------
+def cmd_vps(target):
     """
     Provision & run Tashi installer di VPS x86_64 via SSH.
-    Argumen: target dalam format user@host atau user@host:port
+    Argumen: target -> 'user@host' atau 'user@host:port'
     """
     if ":" in target:
         host, port = target.split(":", 1)
@@ -172,39 +189,38 @@ def cmd_vps(target: str):
     [✓] Installer Tashi dijalankan di VPS.
     • Perhatikan output SSH tadi: akan ada URL "bond worker". Buka dengan wallet Solana (Devnet),
       sign, lalu paste License Token ke terminal VPS saat diminta.
-    • Cek status/logs di VPS dengan perintah docker/podman standar, atau cukup dari sini:
-      - ssh user@host 'docker ps -a'  (jika pakai Docker)
+    • Cek status/logs di VPS dengan perintah docker/podman standar.
     """))
 
 # ---------------------- Commands ----------------------
 def cmd_status():
     print("=== Status Worker (jika local proot digunakan) ===")
-    in_proot(
-        "podman ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' | "
-        f"(grep -E '({CONTAINER_NAME}|NAMES)' || true)"
-    )
+    cmd1 = ("podman ps -a --format 'table {{.Names}}\\t{{.Image}}\\t{{.Status}}' | "
+            "(grep -E '(" + CONTAINER_NAME + "|NAMES)' || true)")
+    in_proot(cmd1, check=False)
+
     print("\n=== Detail (jika tersedia) ===")
-    cmd = (
-        "podman inspect " + CONTAINER_NAME + " >/dev/null 2>&1 && "
-        "podman inspect " + CONTAINER_NAME + " --format '{{.State.Status}} {{.Config.Image}}' || true"
-    )
-    in_proot(cmd, check=False)
+    cmd2 = ("podman inspect " + CONTAINER_NAME + " >/dev/null 2>&1 && "
+            "podman inspect " + CONTAINER_NAME + " --format '{{.State.Status}} {{.Config.Image}}' || true")
+    in_proot(cmd2, check=False)
+
     saved = get_saved_wallet()
-    if saved: print(f"\n[i] Wallet tersimpan (panduan saat bonding): {saved}")
+    if saved:
+        print(f"\n[i] Wallet tersimpan (panduan saat bonding): {saved}")
 
 def cmd_logs():
     print("=== Logs (CTRL+C untuk keluar) ===")
-    in_proot(f"podman logs -f {CONTAINER_NAME}")
+    in_proot("podman logs -f " + CONTAINER_NAME)
 
 def cmd_restart():
     print("=== Restart Worker ===")
-    in_proot(f"podman restart {CONTAINER_NAME}")
+    in_proot("podman restart " + CONTAINER_NAME)
 
 def cmd_uninstall():
     print("=== Uninstall Worker ===")
-    in_proot(f"podman rm -f {CONTAINER_NAME} || true")
-    in_proot(f"podman rm -f {CONTAINER_NAME}-old || true")
-    in_proot(f"podman volume rm {AUTH_VOLUME} || true")
+    in_proot("podman rm -f " + CONTAINER_NAME + " || true")
+    in_proot("podman rm -f " + CONTAINER_NAME + "-old || true")
+    in_proot("podman volume rm " + AUTH_VOLUME + " || true")
     print("[i] Selesai uninstall. Jalankan 'python bot.py' untuk memasang ulang.")
 
 def cmd_wallet(addr):
@@ -218,12 +234,15 @@ def cmd_wallet(addr):
         print("[i] Saat bonding, pilih wallet ini di Phantom/Solflare (Devnet).")
     else:
         cur = cfg.get("solana_wallet")
-        print(f"[i] Wallet tersimpan: {cur}" if cur else "[i] Belum ada wallet. Set: python bot.py wallet <ALAMAT_SOLANA>")
+        if cur:
+            print(f"[i] Wallet tersimpan: {cur}")
+        else:
+            print("[i] Belum ada wallet. Set dengan: python bot.py wallet <ALAMAT_SOLANA>")
 
 def cmd_rebond():
     print("=== Rebond (reset otorisasi & ulangi pemasangan) ===")
-    in_proot(f"podman rm -f {CONTAINER_NAME} || true")
-    in_proot(f"podman volume rm {AUTH_VOLUME} || true")
+    in_proot("podman rm -f " + CONTAINER_NAME + " || true")
+    in_proot("podman volume rm " + AUTH_VOLUME + " || true")
     run_tashi_install()
     show_next_steps()
 
@@ -231,7 +250,8 @@ def cmd_faucet():
     print("=== Buka Faucet Devnet ===")
     open_url_android("https://faucet.solana.com/")
     wal = get_saved_wallet()
-    if wal: print(f"[i] Tempel alamat ini di faucet: {wal}")
+    if wal:
+        print(f"[i] Tempel alamat ini di faucet: {wal}")
 
 # ---------------------- Entry ----------------------
 def main():
@@ -244,19 +264,24 @@ def main():
         help="Aksi (default: install)"
     )
     ap.add_argument("value", nargs="?", help="Tambahan (mis. user@host untuk 'vps', atau alamat untuk 'wallet')")
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass cek arsitektur (Android/ARM). TIDAK didukung resmi."
+    )
     args = ap.parse_args()
 
     if len(sys.argv) == 1:
         print("[i] Tidak ada argumen. Menjalankan default: install\n")
 
     if args.action == "install":
-        # Di Android ARM akan berhenti elegan dengan pesan saran VPS
-        preflight()
+        preflight(force=args.force)
         install_termux_prereqs()
         ensure_ubuntu_proot()
         setup_inside_ubuntu()
         wal = get_saved_wallet()
-        if wal: print(f"[i] Gunakan wallet ini saat bonding: {wal}")
+        if wal:
+            print(f"[i] Gunakan wallet ini saat bonding: {wal}")
         run_tashi_install()
         show_next_steps()
     elif args.action == "vps":
