@@ -2,19 +2,20 @@
 # -*- coding: utf-8 -*-
 """
 Tashi DePIN Worker — Termux helper (EXPERIMENTAL)
-- Termux -> proot-distro (Ubuntu) -> Podman (rootless) -> Tashi install.sh
-- Jalankan cukup:  python bot.py   (default: install)
-- Sub-commands:
-    python bot.py install        # pasang & jalankan installer interaktif
-    python bot.py status         # status kontainer + operator address
-    python bot.py logs           # follow log worker
-    python bot.py restart        # restart worker
-    python bot.py uninstall      # hapus worker + auth volume
-    python bot.py wallet <ADDR>  # simpan/ganti wallet Solana (devnet)
-    python bot.py wallet         # lihat wallet tersimpan
-    python bot.py rebond         # reset otorisasi & ulangi pemasangan (untuk ganti wallet)
-    python bot.py faucet         # buka faucet devnet di browser Android
+Termux -> proot-distro (Ubuntu) -> Podman (rootless) -> Tashi install.sh
+
+Cara pakai:
+  python bot.py                # default: install
+  python bot.py status
+  python bot.py logs
+  python bot.py restart
+  python bot.py uninstall
+  python bot.py wallet <ALAMAT_SOLANA>   # simpan/ganti wallet
+  python bot.py wallet                   # lihat wallet tersimpan
+  python bot.py rebond                   # reset auth & pasang ulang (untuk ganti wallet)
+  python bot.py faucet                   # buka faucet devnet (isi SOL)
 """
+
 import argparse
 import json
 import os
@@ -23,8 +24,8 @@ import re
 import shutil
 import subprocess
 import sys
-from textwrap import dedent
 from pathlib import Path
+from textwrap import dedent
 
 UBUNTU_DISTRO = "ubuntu"
 INSTALL_URL_PRIMARY = "https://depin.tashi.network/install.sh"
@@ -62,21 +63,21 @@ def load_config():
             return {}
     return {}
 
-def save_config(cfg: dict):
+def save_config(cfg):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
 
-def get_saved_wallet() -> str | None:
+def get_saved_wallet():
     return load_config().get("solana_wallet")
 
-# Very lightweight Solana address check: base58 (no 0 O I l), length ~32..48 chars
+# Base58 sederhana (tanpa 0 O I l), panjang 32..48
 _BASE58_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,48}$")
 
-def validate_wallet(addr: str) -> bool:
-    return bool(_BASE58_RE.match(addr.strip()))
+def validate_wallet(addr):
+    return bool(_BASE58_RE.match(addr.strip())) if addr else False
 
-def open_url_android(url: str):
-    # Buka URL di browser Android bila 'am' tersedia, selain itu hanya cetak URL-nya
+def open_url_android(url):
+    # Buka URL di browser Android jika 'am' ada; kalau tidak, tampilkan URL
     if is_cmd("am"):
         run(f'am start -a android.intent.action.VIEW -d "{url}"', check=False)
     print(f"[i] Buka di browser: {url}")
@@ -118,40 +119,49 @@ def setup_inside_ubuntu():
 
 def run_tashi_install():
     print("\n=== Step 4: Jalankan installer resmi Tashi (mode interaktif) ===")
-    # Sesuai docs: installer akan menampilkan URL 'bond-worker' unik dan meminta License Token (operator wallet devnet menandatangani lalu copy token) :contentReference[oaicite:2]{index=2}
-    cmd = dedent(f"""
-        set -e
-        if command -v curl >/dev/null 2>&1; then
-            bash -lc 'curl -fsSL {INSTALL_URL_PRIMARY} | bash -s -' \
-            || bash -lc 'curl -fsSL {INSTALL_URL_ALT} | bash -s -'
-        else
-            bash -lc 'wget -qO- {INSTALL_URL_PRIMARY} | bash -s -' \
-            || bash -lc 'wget -qO- {INSTALL_URL_ALT} | bash -s -'
-        fi
-    """).strip().replace("\n", " ")
+    # Coba primary, jika gagal pakai alternatif
+    cmd = (
+        "set -e; "
+        "if command -v curl >/dev/null 2>&1; then "
+        f"bash -lc 'curl -fsSL {INSTALL_URL_PRIMARY} | bash -s -' || "
+        f"bash -lc 'curl -fsSL {INSTALL_URL_ALT} | bash -s -'; "
+        "else "
+        f"bash -lc 'wget -qO- {INSTALL_URL_PRIMARY} | bash -s -' || "
+        f"bash -lc 'wget -qO- {INSTALL_URL_ALT} | bash -s -'; "
+        "fi"
+    )
     in_proot(cmd, check=True)
 
 def show_next_steps():
-    wal = get_saved_wallet()
-    wallet_hint = f"\n    • Wallet Solana (devnet) yang kamu set: {wal}" if wal else ""
-    print(dedent(f"""
+    print(dedent("""
     === Langkah Lanjut ===
     • Saat installer menampilkan URL "bond worker", buka URL itu di browser Android (Phantom/solflare devnet),
-      connect wallet, sign, lalu klik "Copy License" dan paste token ke terminal. (Inilah yang menetapkan operator address & penerima reward). :contentReference[oaicite:3]{index=3}{wallet_hint}
-    • Kalau wallet belum berisi devnet SOL, isi dulu via faucet resmi: faucet.solana.com (Devnet). :contentReference[oaicite:4]{index=4}
-    • Port UDP 39065 sebaiknya terbuka publik agar earning optimal (bila NAT/seluler, earning bisa berkurang). :contentReference[oaicite:5]{index=5}
-    """))
+      connect wallet, sign, lalu klik "Copy License" dan paste token ke terminal. Ini yang menetapkan
+      operator address & penerima reward.
+    • Kalau wallet belum berisi devnet SOL, isi dulu via faucet devnet: https://faucet.solana.com/
+    • Port UDP 39065 sebaiknya terbuka publik agar earning optimal (di NAT/seluler bisa tertutup).
+    """).strip())
+    wal = get_saved_wallet()
+    if wal:
+        print(f"    • Wallet Solana (devnet) yang kamu set: {wal}")
 
 # ---------------------- Commands ----------------------
 def cmd_status():
     print("=== Status Worker ===")
-    in_proot(f"podman ps -a --format 'table {{.Names}}\\t{{.Image}}\\t{{.Status}}' | (grep -E '({CONTAINER_NAME}|NAMES)' || true)")
-    # Coba tampilkan Operator address dari log terakhir saat authorize
-    print("\n=== Operator Address (dari log, jika ada) ===")
-    in_proot(f"podman logs {CONTAINER_NAME} 2>/dev/null | grep -m1 -E 'Operator address:' || true")
+    in_proot(
+        "podman ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' | "
+        f"(grep -E '({CONTAINER_NAME}|NAMES)' || true)"
+    )
+    print("\n=== Detail (jika tersedia) ===")
+    cmd = (
+        "podman inspect " + CONTAINER_NAME + " >/dev/null 2>&1 && "
+        "podman inspect " + CONTAINER_NAME + " --format '{{.State.Status}} {{.Config.Image}}' || true"
+    )
+    in_proot(cmd, check=False)
+
     saved = get_saved_wallet()
     if saved:
-        print(f"\n[i] Wallet tersimpan (untuk panduan bonding): {saved}")
+        print(f"\n[i] Wallet tersimpan (panduan saat bonding): {saved}")
 
 def cmd_logs():
     print("=== Logs (CTRL+C untuk keluar) ===")
@@ -168,15 +178,15 @@ def cmd_uninstall():
     in_proot(f"podman volume rm {AUTH_VOLUME} || true")
     print("[i] Selesai uninstall. Jalankan 'python bot.py' untuk memasang ulang.")
 
-def cmd_wallet(addr: str | None):
+def cmd_wallet(addr):
     cfg = load_config()
     if addr:
         if not validate_wallet(addr):
-            raise SystemExit("[x] Alamat wallet tidak valid. Gunakan alamat Solana base58 (devnet/mainnet sama formatnya).")
-        cfg["solana_wallet"] = addr
+            raise SystemExit("[x] Alamat wallet tidak valid. Gunakan alamat Solana base58 (Devnet/Mainnet sama format).")
+        cfg["solana_wallet"] = addr.strip()
         save_config(cfg)
-        print(f"[✓] Wallet Solana disimpan: {addr}")
-        print("[i] Saat bonding, pilih wallet ini di Phantom/solflare (mode Devnet).")
+        print(f"[✓] Wallet Solana disimpan: {addr.strip()}")
+        print("[i] Saat bonding, pilih wallet ini di Phantom/Solflare (mode Devnet).")
     else:
         cur = cfg.get("solana_wallet")
         if cur:
@@ -186,16 +196,15 @@ def cmd_wallet(addr: str | None):
 
 def cmd_rebond():
     print("=== Rebond (reset otorisasi & ulangi pemasangan) ===")
-    # Hapus auth volume agar token lama terhapus, lalu jalankan installer lagi
     in_proot(f"podman rm -f {CONTAINER_NAME} || true")
     in_proot(f"podman volume rm {AUTH_VOLUME} || true")
     run_tashi_install()
     show_next_steps()
 
 def cmd_faucet():
-    wal = get_saved_wallet()
     print("=== Buka Faucet Devnet ===")
     open_url_android("https://faucet.solana.com/")
+    wal = get_saved_wallet()
     if wal:
         print(f"[i] Tempel alamat ini di kolom faucet: {wal}")
 
@@ -220,7 +229,6 @@ def main():
         install_termux_prereqs()
         ensure_ubuntu_proot()
         setup_inside_ubuntu()
-        # Info wallet sebelum masuk installer
         wal = get_saved_wallet()
         if wal:
             print(f"[i] Gunakan wallet ini saat proses bonding: {wal}")
