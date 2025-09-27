@@ -2,18 +2,19 @@
 # -*- coding: utf-8 -*-
 """
 Tashi DePIN Worker — Termux helper (EXPERIMENTAL)
-Termux -> proot-distro (Ubuntu) -> Podman (rootless) -> Tashi install.sh
+Termux -> (deteksi ARM dan stop) atau provisioning ke VPS x86_64
 
-Cara pakai:
-  python bot.py                # default: install
+Cara pakai (di Termux):
+  python bot.py                # default: install (akan stop di ARM dgn message & saran VPS)
+  python bot.py vps user@IP    # PROVISION ke VPS x86_64 via SSH (root/sudo)
   python bot.py status
   python bot.py logs
   python bot.py restart
   python bot.py uninstall
-  python bot.py wallet <ALAMAT_SOLANA>   # simpan/ganti wallet
-  python bot.py wallet                   # lihat wallet tersimpan
-  python bot.py rebond                   # reset auth & pasang ulang (untuk ganti wallet)
-  python bot.py faucet                   # buka faucet devnet (isi SOL)
+  python bot.py wallet <ALAMAT_SOLANA>
+  python bot.py wallet
+  python bot.py rebond
+  python bot.py faucet
 """
 
 import argparse
@@ -37,7 +38,6 @@ AUTH_VOLUME = "tashi-depin-worker-auth"
 CONFIG_DIR = Path.home() / ".tashi-termux"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 
-# ---------------------- Utils ----------------------
 def run(cmd, check=True, shell=True, env=None):
     print(f"\n>> {cmd}")
     proc = subprocess.run(cmd, shell=shell, env=env)
@@ -49,18 +49,13 @@ def in_proot(cmd, check=True):
     full = f'proot-distro login {UBUNTU_DISTRO} -- bash -lc "{cmd}"'
     return run(full, check=check, shell=True)
 
-def is_cmd(name):
-    return shutil.which(name) is not None
-
-def is_termux():
-    return os.path.exists("/data/data/com.termux/files/usr")
+def is_cmd(name): return shutil.which(name) is not None
+def is_termux(): return os.path.exists("/data/data/com.termux/files/usr")
 
 def load_config():
     if CONFIG_PATH.exists():
-        try:
-            return json.loads(CONFIG_PATH.read_text())
-        except Exception:
-            return {}
+        try: return json.loads(CONFIG_PATH.read_text())
+        except Exception: return {}
     return {}
 
 def save_config(cfg):
@@ -70,28 +65,28 @@ def save_config(cfg):
 def get_saved_wallet():
     return load_config().get("solana_wallet")
 
-# Base58 sederhana (tanpa 0 O I l), panjang 32..48
 _BASE58_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,48}$")
-
-def validate_wallet(addr):
-    return bool(_BASE58_RE.match(addr.strip())) if addr else False
+def validate_wallet(addr): return bool(_BASE58_RE.match(addr.strip())) if addr else False
 
 def open_url_android(url):
-    # Buka URL di browser Android jika 'am' ada; kalau tidak, tampilkan URL
-    if is_cmd("am"):
-        run(f'am start -a android.intent.action.VIEW -d "{url}"', check=False)
+    if is_cmd("am"): run(f'am start -a android.intent.action.VIEW -d "{url}"', check=False)
     print(f"[i] Buka di browser: {url}")
 
-# ---------------------- Steps ----------------------
+# ---------------------- Termux path (local/proot) ----------------------
 def preflight():
     print("=== Preflight ===")
     if not is_termux():
         print("[!] Bukan di Termux. Script ini ditulis untuk Termux (Android). Lanjut tetap dicoba.")
     arch = platform.machine().lower()
     print(f"[i] Detected arch: {arch}")
+    # Tashi mensyaratkan OS 64-bit yang didukung (x86_64/amd64). ARM/aarch64 tidak didukung saat ini.
     if "x86_64" not in arch and "amd64" not in arch:
-        print("[!] Peringatan: arsitektur non-x86_64 (mis. arm64/Android). "
-              "Tashi resmi butuh Docker/Podman di OS 64-bit yang didukung; Termux tidak resmi (eksperimental).")
+        raise SystemExit(
+            "\n[x] Platform ARM/aarch64 terdeteksi. Installer Tashi saat ini mendukung x86_64/amd64 "
+            "(Linux 64-bit/WSL/macOS Intel) dengan Docker/Podman. "
+            "Jalankan di VPS/PC x86-64. Gunakan:  python bot.py vps user@IP\n"
+            "Referensi: docs.tashi.network Node Installation."
+        )
     if not is_cmd("pkg"):
         raise SystemExit("[x] Perintah 'pkg' tidak ditemukan. Pastikan memakai Termux.")
 
@@ -119,7 +114,6 @@ def setup_inside_ubuntu():
 
 def run_tashi_install():
     print("\n=== Step 4: Jalankan installer resmi Tashi (mode interaktif) ===")
-    # Coba primary, jika gagal pakai alternatif
     cmd = (
         "set -e; "
         "if command -v curl >/dev/null 2>&1; then "
@@ -135,19 +129,56 @@ def run_tashi_install():
 def show_next_steps():
     print(dedent("""
     === Langkah Lanjut ===
-    • Saat installer menampilkan URL "bond worker", buka URL itu di browser Android (Phantom/solflare devnet),
-      connect wallet, sign, lalu klik "Copy License" dan paste token ke terminal. Ini yang menetapkan
-      operator address & penerima reward.
-    • Kalau wallet belum berisi devnet SOL, isi dulu via faucet devnet: https://faucet.solana.com/
-    • Port UDP 39065 sebaiknya terbuka publik agar earning optimal (di NAT/seluler bisa tertutup).
+    • Installer akan menampilkan URL "bond worker". Buka di browser (Phantom/Solflare Devnet),
+      connect wallet, sign, klik "Copy License", lalu paste token ke terminal — ini yang menetapkan
+      operator address (penerima reward).
+    • Butuh SOL Devnet? Faucet: https://faucet.solana.com/
+    • Untuk earning optimal, buka UDP 39065 dari publik (kalau NAT/seluler tertutup, earning bisa berkurang).
     """).strip())
     wal = get_saved_wallet()
     if wal:
         print(f"    • Wallet Solana (devnet) yang kamu set: {wal}")
 
+# ---------------------- VPS Provisioning via SSH ----------------------
+def cmd_vps(target: str):
+    """
+    Provision & run Tashi installer di VPS x86_64 via SSH.
+    Argumen: target dalam format user@host atau user@host:port
+    """
+    if ":" in target:
+        host, port = target.split(":", 1)
+    else:
+        host, port = target, "22"
+
+    if not is_cmd("ssh"):
+        raise SystemExit("[x] 'ssh' tidak ditemukan. Pasang openssh: pkg install openssh")
+
+    print("=== Provisioning ke VPS ===")
+    # Validasi arsitektur & siapkan runtime di remote, lalu jalankan installer resmi
+    remote = (
+        "set -e; "
+        'ARCH=$(uname -m); if [ \"$ARCH\" != \"x86_64\" ] && [ \"$ARCH\" != \"amd64\" ]; then '
+        'echo \"[x] Unsupported arch on VPS: $ARCH (butuh x86_64/amd64)\"; exit 2; fi; '
+        "if ! command -v curl >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y curl ca-certificates; fi; "
+        "if ! command -v docker >/dev/null 2>&1 && ! command -v podman >/dev/null 2>&1; then "
+        "  curl -fsSL https://get.docker.com | sh; "
+        "fi; "
+        "(command -v ufw >/dev/null 2>&1 && sudo ufw allow 39065/udp) || true; "
+        f"curl -fsSL {INSTALL_URL_PRIMARY} | sudo bash -s - || curl -fsSL {INSTALL_URL_ALT} | sudo bash -s -"
+    )
+    run(f"ssh -p {port} {host} '{remote}'", check=True)
+
+    print(dedent("""
+    [✓] Installer Tashi dijalankan di VPS.
+    • Perhatikan output SSH tadi: akan ada URL "bond worker". Buka dengan wallet Solana (Devnet),
+      sign, lalu paste License Token ke terminal VPS saat diminta.
+    • Cek status/logs di VPS dengan perintah docker/podman standar, atau cukup dari sini:
+      - ssh user@host 'docker ps -a'  (jika pakai Docker)
+    """))
+
 # ---------------------- Commands ----------------------
 def cmd_status():
-    print("=== Status Worker ===")
+    print("=== Status Worker (jika local proot digunakan) ===")
     in_proot(
         "podman ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' | "
         f"(grep -E '({CONTAINER_NAME}|NAMES)' || true)"
@@ -158,10 +189,8 @@ def cmd_status():
         "podman inspect " + CONTAINER_NAME + " --format '{{.State.Status}} {{.Config.Image}}' || true"
     )
     in_proot(cmd, check=False)
-
     saved = get_saved_wallet()
-    if saved:
-        print(f"\n[i] Wallet tersimpan (panduan saat bonding): {saved}")
+    if saved: print(f"\n[i] Wallet tersimpan (panduan saat bonding): {saved}")
 
 def cmd_logs():
     print("=== Logs (CTRL+C untuk keluar) ===")
@@ -182,17 +211,14 @@ def cmd_wallet(addr):
     cfg = load_config()
     if addr:
         if not validate_wallet(addr):
-            raise SystemExit("[x] Alamat wallet tidak valid. Gunakan alamat Solana base58 (Devnet/Mainnet sama format).")
+            raise SystemExit("[x] Alamat wallet tidak valid. Gunakan alamat Solana base58.")
         cfg["solana_wallet"] = addr.strip()
         save_config(cfg)
         print(f"[✓] Wallet Solana disimpan: {addr.strip()}")
-        print("[i] Saat bonding, pilih wallet ini di Phantom/Solflare (mode Devnet).")
+        print("[i] Saat bonding, pilih wallet ini di Phantom/Solflare (Devnet).")
     else:
         cur = cfg.get("solana_wallet")
-        if cur:
-            print(f"[i] Wallet tersimpan: {cur}")
-        else:
-            print("[i] Belum ada wallet tersimpan. Set dengan: python bot.py wallet <ALAMAT_SOLANA>")
+        print(f"[i] Wallet tersimpan: {cur}" if cur else "[i] Belum ada wallet. Set: python bot.py wallet <ALAMAT_SOLANA>")
 
 def cmd_rebond():
     print("=== Rebond (reset otorisasi & ulangi pemasangan) ===")
@@ -205,8 +231,7 @@ def cmd_faucet():
     print("=== Buka Faucet Devnet ===")
     open_url_android("https://faucet.solana.com/")
     wal = get_saved_wallet()
-    if wal:
-        print(f"[i] Tempel alamat ini di kolom faucet: {wal}")
+    if wal: print(f"[i] Tempel alamat ini di faucet: {wal}")
 
 # ---------------------- Entry ----------------------
 def main():
@@ -214,26 +239,30 @@ def main():
     ap.add_argument(
         "action",
         nargs="?",
-        choices=["install", "status", "logs", "restart", "uninstall", "wallet", "rebond", "faucet"],
+        choices=["install", "vps", "status", "logs", "restart", "uninstall", "wallet", "rebond", "faucet"],
         default="install",
         help="Aksi (default: install)"
     )
-    ap.add_argument("value", nargs="?", help="Nilai tambahan (mis. untuk 'wallet <ALAMAT>')")
+    ap.add_argument("value", nargs="?", help="Tambahan (mis. user@host untuk 'vps', atau alamat untuk 'wallet')")
     args = ap.parse_args()
 
     if len(sys.argv) == 1:
         print("[i] Tidak ada argumen. Menjalankan default: install\n")
 
     if args.action == "install":
+        # Di Android ARM akan berhenti elegan dengan pesan saran VPS
         preflight()
         install_termux_prereqs()
         ensure_ubuntu_proot()
         setup_inside_ubuntu()
         wal = get_saved_wallet()
-        if wal:
-            print(f"[i] Gunakan wallet ini saat proses bonding: {wal}")
+        if wal: print(f"[i] Gunakan wallet ini saat bonding: {wal}")
         run_tashi_install()
         show_next_steps()
+    elif args.action == "vps":
+        if not args.value:
+            raise SystemExit("Usage: python bot.py vps user@host[:port]")
+        cmd_vps(args.value)
     elif args.action == "status":
         cmd_status()
     elif args.action == "logs":
